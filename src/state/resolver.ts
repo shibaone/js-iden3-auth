@@ -1,12 +1,50 @@
-import { Id } from '@iden3/js-iden3-core';
+import { Id, ChainIds } from '@iden3/js-iden3-core';
 import { ethers } from 'ethers';
 import { Abi__factory } from './types/ethers-contracts';
 import { IState } from './types/ethers-contracts/Abi';
 
 const zeroInt = BigInt(0);
 
+const DefaultContext = [
+  'https://www.w3.org/ns/did/v1',
+  'https://schema.iden3.io/core/jsonld/auth.jsonld'
+];
+
+const StateType = 'Iden3StateInfo2023';
+
 export type Resolvers = {
   [key: string]: IStateResolver;
+};
+
+export type VerificationMethod = {
+  id: string;
+  type: string;
+  controller: string;
+  stateContractAddress: string;
+  published: boolean;
+  info: {
+    id: string;
+    state: string;
+    replacedByState: string;
+    createdAtTimestamp: number;
+    replacedAtTimestamp: number;
+    createdAtBlock: number;
+    replacedAtBlock: number;
+  };
+  global: {
+    root: string;
+    replacedByRoot: string;
+    createdAtTimestamp: number;
+    replacedAtTimestamp: number;
+    createdAtBlock: number;
+    replacedAtBlock: number;
+  };
+};
+
+export type DIDDoc = {
+  context: string[];
+  id: string;
+  verificationMethod: VerificationMethod;
 };
 
 export interface IStateResolver {
@@ -29,14 +67,7 @@ export class EthStateResolver implements IStateResolver {
   }
 
   public async resolve(id: bigint, state: bigint): Promise<ResolvedState> {
-    const url = new URL(this.rpcUrl);
-    const ethersProvider = new ethers.providers.JsonRpcProvider({
-      url: url.href,
-      user: url.username,
-      password: url.password
-    });
-    const contract = Abi__factory.connect(this.contractAddress, ethersProvider);
-
+    const contract = this.getContract();
     // check if id is genesis
     const isGenesis = isGenesisStateId(id, state);
 
@@ -78,13 +109,7 @@ export class EthStateResolver implements IStateResolver {
   }
 
   public async rootResolve(state: bigint): Promise<ResolvedState> {
-    const url = new URL(this.rpcUrl);
-    const ethersProvider = new ethers.providers.JsonRpcProvider({
-      url: url.href,
-      user: url.username,
-      password: url.password
-    });
-    const contract = Abi__factory.connect(this.contractAddress, ethersProvider);
+    const contract = this.getContract();
 
     let globalStateInfo: IState.GistRootInfoStructOutput;
     try {
@@ -118,6 +143,66 @@ export class EthStateResolver implements IStateResolver {
       transitionTimestamp: 0,
       genesis: false
     };
+  }
+
+  public async resolveDIDDoc(didString: string): Promise<DIDDoc> {
+    const contract = this.getContract();
+
+    const blockchain = didString.split(':')[2];
+    const network = didString.split(':')[3];
+
+    const chainID = ChainIds[`${blockchain}:${network}`];
+
+    const id = didString.split(':')[4];
+    if (!id) throw new Error('DID not valid');
+    const userState = await contract.getStateInfoById(Id.fromString(id).bigInt());
+
+    const root = await contract.getGISTRoot();
+
+    if (!root) throw new Error('Can not get GIST root');
+
+    const rootInfo = await contract.getGISTRootInfo(root._hex);
+
+    if (!rootInfo) throw new Error('Can not get GIST root info');
+
+    return {
+      context: DefaultContext,
+      id: didString,
+      verificationMethod: {
+        id: didString + '#stateInfo',
+        type: StateType,
+        controller: didString,
+        stateContractAddress: `${chainID}:${this.contractAddress}`,
+        published: true,
+        info: {
+          id: didString,
+          state: userState.state._hex,
+          replacedByState: userState.replacedByState._hex,
+          createdAtTimestamp: userState.createdAtTimestamp.toNumber(),
+          replacedAtTimestamp: userState.replacedAtTimestamp.toNumber(),
+          createdAtBlock: userState.createdAtBlock.toNumber(),
+          replacedAtBlock: userState.replacedAtBlock.toNumber()
+        },
+        global: {
+          root: rootInfo.root._hex,
+          replacedByRoot: rootInfo.replacedByRoot._hex,
+          createdAtTimestamp: rootInfo.createdAtTimestamp.toNumber(),
+          replacedAtTimestamp: rootInfo.replacedAtTimestamp.toNumber(),
+          createdAtBlock: rootInfo.createdAtBlock.toNumber(),
+          replacedAtBlock: rootInfo.replacedAtBlock.toNumber()
+        }
+      }
+    };
+  }
+
+  public getContract() {
+    const url = new URL(this.rpcUrl);
+    const ethersProvider = new ethers.providers.JsonRpcProvider({
+      url: url.href,
+      user: url.username,
+      password: url.password
+    });
+    return Abi__factory.connect(this.contractAddress, ethersProvider);
   }
 }
 
